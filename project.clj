@@ -7,4 +7,5 @@
   :plugins [[lein-tar "1.1.0"]]
   :dependencies [[com.datomic/datomic-free "0.8.3546"]
                  [commons-codec "1.7"]
+                 [org.clojars.kyleburton/clj-xpath "1.4.0-SNAPSHOT"]
                  [org.clojure/clojure "1.5.0-alpha6"]])

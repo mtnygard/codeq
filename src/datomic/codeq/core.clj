@@ -13,7 +13,9 @@
             [clojure.string :as string]
             [datomic.codeq.util :refer [cond-> index->id-fn tempid?]]
             [datomic.codeq.analyzer :as az]
-            [datomic.codeq.analyzers.clj])
+            [datomic.codeq.analyzers.clj]
+            [datomic.codeq.analyzers.pom]
+            [clojure.repl :refer [pst]])
   (:import java.util.Date)
   (:gen-class))
 
@@ -467,7 +469,7 @@
     (d/request-index conn)
     (println "Import complete!")))
 
-(def analyzers [(datomic.codeq.analyzers.clj/impl)])
+(def analyzers [(datomic.codeq.analyzers.clj/impl) (datomic.codeq.analyzers.pom/impl)])
 
 (defn run-analyzers
   [conn]
@@ -515,7 +517,7 @@
                 adata (try
                         (az/analyze a db f src)
                         (catch Exception ex
-                          (println (.getMessage ex))
+                          (clojure.repl/pst ex)
                           []))]
             (d/transact conn 
                         (conj adata {:db/id (d/tempid :db.part/tx)

@@ -3,15 +3,44 @@
             [datomic.codeq.util :refer [cond-> index->id-fn tempid?]]
             [datomic.codeq.analyzer :as az]
             [clj-xpath.core :as x]
-            [clojure.pprint :refer [pprint]]))
+            [clojure.pprint :refer [pprint]])
+  (:import  [java.io StringWriter]
+            [javax.xml.transform OutputKeys Transformer TransformerException TransformerFactory]
+            [javax.xml.transform.dom DOMSource]
+            [javax.xml.transform.stream StreamResult]))
+
+(defn dom-node->string
+  [n]
+  (let [node (:node n)
+        sw (StringWriter.)
+        t  (.. TransformerFactory newInstance newTransformer)]
+    (.setOutputProperty t OutputKeys/OMIT_XML_DECLARATION "yes")
+    (.transform t (DOMSource. node) (StreamResult. sw))
+    (.toString sw)))
+
+(defn sha->id
+  [db sha]
+  ((index->id-fn db :code/sha) sha))
+
+(defn sha
+  [content]
+  (-> content
+      az/ws-minify
+      az/sha))
 
 (defn maybe-new-codeq
-  [db f ret contents loc sha->id added]
-  (let [sha       (-> contents az/ws-minify az/sha)
-        codeid    (sha->id sha)
+  [{:keys [db f ret added] :as state} loc contents]
+  (let [sha       (sha contents)
+        codeid    (sha->id db sha)
         newcodeid (and (tempid? codeid) (not (added codeid)))
-        ret       (cond-> ret newcodeid (conj {:db/id codeid :code/sha sha :code/text contents}))
-        added     (cond-> added newcodeid (conj codeid))
+        ret       (cond-> ret
+                          newcodeid
+                          (conj {:db/id codeid
+                                 :code/sha sha
+                                 :code/text contents}))
+        added     (cond-> added
+                          newcodeid
+                          (conj codeid))
 
         codeqid   (or (ffirst (d/q '[:find ?e :in $ ?f ?loc
                                      :where [?e :codeq/file ?f]
@@ -25,16 +54,15 @@
                                  :codeq/file f
                                  :codeq/loc loc
                                  :codeq/code codeid}))]
-    [ret codeqid added]))
+    [codeqid (assoc state :ret ret :added added)]))
 
 (defn xpath->attribute
-  [path attribute db f dom ret {:keys [sha->id added] :as ctx}]
+  [{:keys [db f dom ret added] :as state} path attribute]
   (if-let [node (first (x/$x path dom))]
-    (let [contents            (:text node)
-          [ret codeqid added] (maybe-new-codeq db f ret contents path sha->id added)
-          ret                 (conj ret [:db/add f attribute contents])]
-      [ret (assoc ctx :added added)])
-    [ret ctx]))
+    (let [contents            (dom-node->string node)
+          [codeqid state]     (maybe-new-codeq state path contents)]
+      (update-in state [:ret] conj [:db/add f attribute contents]))
+    state))
 
 (defn find-depid
   [db group artifact version]
@@ -45,74 +73,123 @@
                         [?d :pom/version ?v]]
                db group artifact version)))
 
-(defn maybe-new-depid
-  [db {:keys [groupId artifactId version]}]
-  (or (find-depid db groupId artifactId version)
-      (d/tempid :db.part/user)))
+(defn maybe-new-dependency
+  [{:keys [db added ret] :as state} {:keys [groupId artifactId version]}]
+  (let [depid  (or (find-depid db groupId artifactId version)
+                   (d/tempid :db.part/user))
+        added  (cond-> added
+                       (tempid? depid)
+                       (conj depid))
+
+        ret    (cond-> ret
+                       (tempid? depid)
+                       (conj {:db/id depid
+                              :pom/group groupId
+                              :pom/artifact artifactId
+                              :pom/version version}))]
+    [depid (assoc state :added added :ret ret)]))
+
+(defn find-licid
+  [db name url]
+  (ffirst (d/q '[:find ?l
+                 :in $ ?n ?u
+                 :where [?l :license/name ?n]
+                 [?l :license/url ?u]]
+               db name url)))
+
+(defn maybe-new-license
+  [{:keys [db added ret] :as state} {:keys [name url]}]
+  (let [licid  (or (find-licid db name url)
+                   (d/tempid :db.part/user))
+        added  (cond-> added
+                       (tempid? licid)
+                       (conj licid))
+        ret    (cond-> ret
+                       (tempid? licid)
+                       (conj {:db/id licid
+                              :license/name name
+                              :license/url url}))]
+    [licid (assoc state :added added :ret ret)]))
 
 (defn child-with-tag
   [n t]
   (first (filter #(= t (:tag %)) @(:children n))))
 
+(defn tag-contents-as-key
+  [m node k]
+  (cond-> m
+          (child-with-tag node k)
+          (assoc k (:text (child-with-tag node k)))))
+
 (defn dom->dep
   [node]
-  (if-let [children @(:children node)]
-    (let [xtr     (fn [m k]
-                    (if (child-with-tag node k) (assoc m k (:text (child-with-tag node k))) m))
-          m       {:content (:text node)
-                   :path    (str "/project/dependencies[artifactId=\"" (:text (child-with-tag node :artifactId)) "\"]")}
-          m       (xtr m :groupId)
-          m       (xtr m :artifactId)
-          m       (xtr m :version)]
-      m)))
+  (-> {}
+      (assoc :content (dom-node->string node))
+      (assoc :path    (str "/project/dependencies[artifactId=\""
+                           (:text (child-with-tag node :artifactId))
+                           "\"]"))
+      (tag-contents-as-key node :groupId)
+      (tag-contents-as-key node :artifactId)
+      (tag-contents-as-key node :version)))
 
-(defn dom->dependencies
-  [dom]
-  (map dom->dep (x/$x "/project/dependencies/*" dom)))
+(defn dependency-1
+  [{:keys [f] :as state} {:keys [path content] :as d}]
+  (let [[codeqid state]     (maybe-new-codeq state path content)
+        [depid   state]     (maybe-new-dependency state d)
+        ret                 (cond-> (:ret state)
+                                    (or (tempid? depid) ((:added state) depid))
+                                    (conj [:db/add f :pom/dependency depid]))]
+    (assoc state :ret ret)))
+
+(defn dom->license
+  [node]
+  (-> {}
+      (assoc :content (dom-node->string node))
+      (assoc :path    (str "/project/licenses[name=\""
+                           (:text (child-with-tag node :name))
+                           "\"]"))
+      (tag-contents-as-key node :name)
+      (tag-contents-as-key node :url)))
+
+(defn license-1
+  [{:keys [f] :as state} {:keys [path content name url] :as l}]
+  (let [[codeqid state]     (maybe-new-codeq state path content)
+        [licid   state]     (maybe-new-license state l)
+        ret                 (cond-> (:ret state)
+                                    (or (tempid? licid) ((:added state) licid))
+                                    (conj [:db/add f :pom/license licid]))]
+    (assoc state :ret ret)))
+
+(defn multivalue-nodes
+  [{:keys [dom] :as state} parent-xpath node-extractor-fn datomic-upsert-fn]
+  (let [nodes (x/$x parent-xpath dom)]
+    (cond-> state
+            nodes
+            ((fn [st] (reduce datomic-upsert-fn st (map node-extractor-fn nodes)))))))
 
 (defn dependencies
-  [db f dom ret {:keys [sha->id] :as ctx}]
-  (loop [ret ret, ctx ctx, deps (dom->dependencies dom)]
-    (if-let [{:keys [path content groupId artifactId version] :as d} (first deps)]
-      (let [added               (:added ctx)
-            [ret codeqid added] (maybe-new-codeq db f ret content path sha->id added)
-            depid               (maybe-new-depid db d)
+  [state]
+  (multivalue-nodes state "/project/dependencies/*" dom->dep dependency-1))
 
-            ret                 (cond-> ret
-                                        (tempid? depid)
-                                        (conj {:db/id depid
-                                               :pom/group groupId
-                                               :pom/artifact artifactId
-                                               :pom/version version})
-
-                                        (or (tempid? depid) (added depid))
-                                        (conj [:db/add f :pom/dependency depid]))
-            
-            added               (cond-> added
-                                        (tempid? depid)
-                                        (conj depid))
-            ctx                 (assoc ctx :added added)]
-        (recur ret ctx (rest deps)))
-      [ret ctx])))
-
-(def fragments [(partial xpath->attribute "/project/artifactId"  :pom/artifact)
-                (partial xpath->attribute "/project/groupId"     :pom/group)
-                (partial xpath->attribute "/project/name"        :pom/name)
-                (partial xpath->attribute "/project/version"     :pom/version)
-                (partial xpath->attribute "/project/description" :pom/description)
-                dependencies])
+(defn licenses
+  [state]
+  (multivalue-nodes state "/project/licenses/*" dom->license license-1))
 
 (defn analyze
   [db f src]
-  (let [dom (x/xml->doc src)
-        ctx {:sha->id  (index->id-fn db :code/sha)
-             :name->id (index->id-fn db :code/name)
-             :added    #{}}]
-    (loop [ret [], ctx ctx, frags fragments]
-      (if-let [frag (first frags)]
-        (let [[ret ctx] (frag db f dom ret ctx)]
-          (recur ret ctx (rest frags)))
-        ret))))
+  (-> {:db       db
+       :f        f
+       :dom      (x/xml->doc src)
+       :added    #{}
+       :ret      []}
+      (xpath->attribute "/project/artifactId"  :pom/artifact)
+      (xpath->attribute "/project/groupId"     :pom/group)
+      (xpath->attribute "/project/name"        :pom/name)
+      (xpath->attribute "/project/version"     :pom/version)
+      (xpath->attribute "/project/description" :pom/description)
+      (dependencies)
+      (licenses)
+      :ret))
 
 (defn schemas []
   {1 [{:db/id #db/id[:db.part/db]
@@ -156,6 +233,24 @@
        :db/valueType :db.type/ref
        :db/cardinality :db.cardinality/many
        :db/doc "dependencies required by a project"
+       :db.install/_attribute :db.part/db}
+      {:db/id #db/id[:db.part/db]
+       :db/ident :pom/license
+       :db/valueType :db.type/ref
+       :db/cardinality :db.cardinality/many
+       :db/doc "license(s) used in a project"
+       :db.install/_attribute :db.part/db}
+      {:db/id #db/id[:db.part/db]
+       :db/ident :license/name
+       :db/valueType :db.type/string
+       :db/cardinality :db.cardinality/one
+       :db/doc "name of the license"
+       :db.install/_attribute :db.part/db}
+      {:db/id #db/id[:db.part/db]
+       :db/ident :license/url
+       :db/valueType :db.type/url
+       :db/cardinality :db.cardinality/one
+       :db/doc "url of the license"
        :db.install/_attribute :db.part/db}]})
 
 (deftype PomAnalyzer []
@@ -169,18 +264,19 @@
 (defn impl [] (PomAnalyzer.))
 
 (comment
+;;(def uri "datomic:mem://git")
+(def uri "datomic:free://localhost:4334/git")
+(def conn (d/connect uri))
+(def db (d/db conn))
+
 ;; clear analysis for re-run
 (let [db (d/db conn)]
-  (let [eavts (d/q '[:find ?tx ?a ?v :where [?tx :tx/analyzer :pom]] db)]
+  (let [eavts (d/q '[:find ?tx :where [?tx :tx/analyzer :pom]] db)]
     (d/transact conn (map #(vector ':db/retract (first %) ':tx/analyzer ':pom) eavts))
     (d/transact conn (map #(vector ':db/retract (first %) ':tx/analyzerRev 1) eavts)))
   (doseq [[dp] (d/q '[:find ?d :where [?d :pom/group]] db)]
     (d/transact conn [[:db.fn/retractEntity dp]])))
 
-(def uri "datomic:mem://git")
-(def uri "datomic:free://localhost:4334/codeq")
-(def conn (d/connect uri))
-(def db (d/db conn))
 (d/q '[:find ?e :where [?f :file/name "pom.xml"] [?n :node/filename ?f] [?n :node/object ?e]] db)
 (d/q '[:find ?e :where [?e :pom/dependency]] db)
 

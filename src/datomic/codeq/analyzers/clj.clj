@@ -111,4 +111,4 @@
   (schemas [a] (schemas))
   (analyze [a db f src] (analyze db f src)))
 
-(defn impl [] (CljAnalyzer.))
+(defn init [] [(CljAnalyzer.)])

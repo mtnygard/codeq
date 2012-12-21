@@ -11,9 +11,11 @@
             [clojure.java.io :as io]
             [clojure.set]
             [clojure.string :as string]
+            [clojure.tools.cli :refer [cli]]
             [datomic.codeq.util :refer [cond-> index->id-fn tempid?]]
             [datomic.codeq.analyzer :as az]
-            [datomic.codeq.analyzers.clj])
+            [datomic.codeq.analyzers.clj]
+            [datomic.codeq.ipa :refer [extensions extensions-supporting]])
   (:import java.util.Date)
   (:gen-class))
 
@@ -467,10 +469,8 @@
     (d/request-index conn)
     (println "Import complete!")))
 
-(def analyzers [(datomic.codeq.analyzers.clj/impl)])
-
 (defn run-analyzers
-  [conn]
+  [conn analyzers]
   (println "Analyzing...")
   (doseq [a analyzers]
     (let [aname (az/keyname a)
@@ -525,18 +525,30 @@
                                      :tx/analyzerRev arev})))))))
   (println "Analysis complete!"))
 
-(defn main [& [db-uri commit]]
-  (if db-uri 
+
+(def default-analyzers ['datomic.codeq.analyzers.clj/init])
+
+(defn main [analyzers db-uri commit]
+  (let [azs (doall (extensions-supporting (extensions analyzers) az/Analyzer))]
+    (if db-uri 
       (let [conn (ensure-db db-uri)
             [repo-uri repo-name] (get-repo-uri)]
         ;;(prn repo-uri)
         (import-git conn repo-uri repo-name (unimported-commits (d/db conn) commit))
-        (run-analyzers conn))
-      (println "Usage: datomic.codeq.core db-uri [commit-name]")))
+        (run-analyzers conn azs)))))
+
+(defn parse-analyzer-option [csl]
+  (map io/file (string/split csl #",")))
+
+(def arg-options
+  ["-a" "--analyzers" "Analyzer jars to load (comma sperated list)" :parse-fn parse-analyzer-option])
 
 (defn -main
   [& args]
-  (apply main args)
+  (let [[{:keys [analyzers]} [db-uri commit] & _] (cli args arg-options)]
+    (if db-uri
+      (main (concat analyzers default-analyzers) db-uri commit)
+      (println "Usage: datomic.codeq.core [-a analyzer1.jar[,analyzer2.jar]] db-uri [commit-name]")))
   (shutdown-agents)
   (System/exit 0))
 

@@ -1,0 +1,41 @@
+* Design discussion
+** Execution scenarios we want to support
+*** Command-line
+**** Packaged as uberjar with all plugins & core inside one jar
+**** Packages as a standalone codeq jar (uberjar?) with plugins in their own jars or uberjars.
+*** Embedded
+**** Called from other tools, e.g. CCW
+*** REPL
+*** Some future GUI interface to codeq
+**** Insert hand-waving. We're not volunteering for this yet.
+** No other clojure projects using plugin architecture
+** Define protocol for embedding codeq, supplying with Analyzers
+*** Turn the command line interface into a user of the embedding i/f
+** Look for things that every plugin needs to do, extract those
+*** Construct a codeid from a sha & source text
+*** maybe-new-codeq (from maven analyzer)
+*** maybe-new as a general function
+* Do code
+analyzer.jar/META-INF/MANIFEST.MF
+IPA-Initializer: [namespace/fn-symbol]+
+
+Sequence of events inside main:
+1. Set up the classpath
+ - Accept command-line args
+ - For each extension, resolve it
+   - Maybe add a jar to classpath
+   - If a jar, look for an IPA-Extension attribute in the manifest
+     - Resolve it as a symbol, call the function.
+2. At startup, codeq instantiates extensions, filters for ones that
+   satisfy Analyzer.
+** Reducing coupling
+- Plugins still need all of codeq & datomic, which brings in a lot of
+   dependencies (including duplication.)
+- Maybe just build a jar instead of uberjar?
+** Provide credit for add-classpath
+** Confirm EPL compatibility with RH.
+** Confirm use of clojure.tools.cli with RH.
+* Do doco
+* Check out possible bug in Clojure analyzer
+** If function is exactly duplicated in different namespaces, what happens?
+*** Our theory: one codeq, one sha, one :clj/ns. Probably last-one-wins.

@@ -3,11 +3,84 @@
             [datomic.codeq.util :refer [cond-> index->id-fn tempid?]]
             [datomic.codeq.analyzer :as az]
             [clj-xpath.core :as x]
+            [clojure.string :as str]
             [clojure.pprint :refer [pprint]])
   (:import  [java.io StringWriter]
             [javax.xml.transform OutputKeys Transformer TransformerException TransformerFactory]
             [javax.xml.transform.dom DOMSource]
             [javax.xml.transform.stream StreamResult]))
+
+;;; Parser - convert POM to nested maps
+
+(defn dom [s] (x/xml->doc s))
+
+(defn src [node]
+  (let [n (:node node)
+        sw (StringWriter.)
+        t  (.. TransformerFactory newInstance newTransformer)]
+    (.setOutputProperty t OutputKeys/OMIT_XML_DECLARATION "yes")
+    (.transform t (DOMSource. n) (StreamResult. sw))
+    (.toString sw)))
+
+(defn loc [node]
+  (az/ws-minify (src node)))
+
+(defn parameter [m node k]
+  (if-let [cld (first (x/$x k node))]
+    (assoc m (keyword k) (:text cld))
+    m))
+
+(defn parameters [m node & ps]
+  (reduce #(parameter %1 node %2) m ps))
+
+(defn child [m node k]
+  (assoc m (keyword k) (map parse (x/$x (str k "/*") node))))
+
+(defn children [m node & clds]
+  (reduce #(child %1 node %2) m clds))
+
+(defn project [d] (first (x/$x "/project" d)))
+
+(defmulti parse* :tag)
+
+(defn parse [node]
+  (let [l (loc node)]
+    (merge {:loc l
+            :sha (az/sha l)}
+           (parse* node))))
+
+(defmethod parse* :project [node]
+  (-> {:node :project}
+      (parameters node "groupId" "groupId" "artifactId" "version" "name" "description")
+      (children node "licenses" "dependencies")))
+
+(defmethod parse* :dependency [node]
+  (-> {:node :dependency}
+      (parameters node "groupId" "artifactId" "version" "scope")))
+
+(defmethod parse* :license [node]
+  (-> {:node :license}
+      (parameters node "url" "name")))
+
+(defmethod parse* :default [node]
+  (println "Warning: default parse handler for"  node)
+  (:text node))
+
+(defn parse-tree [s]
+  (-> s dom project parse))
+
+(comment
+  (parse-tree (slurp "pom.xml"))
+  )
+
+
+;;; Analyzer
+
+
+
+
+
+
 
 (defn dom-node->string
   [n]

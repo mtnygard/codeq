@@ -5,7 +5,7 @@
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :main datomic.codeq.core
   :plugins [[lein-tar "1.1.0"]]
-  :dependencies [[com.datomic/datomic-free "0.8.3655"]
+  :dependencies [[com.datomic/datomic-free "0.8.3692"]
                  [commons-codec "1.7"]
-                 [org.clojars.kyleburton/clj-xpath "1.4.0-SNAPSHOT"]
+                 [org.clojars.kyleburton/clj-xpath "1.4.1-SNAPSHOT"]
                  [org.clojure/clojure "1.5.0-alpha6"]])
